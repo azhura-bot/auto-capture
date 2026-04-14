@@ -1,0 +1,10 @@
+cara memulainya 
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install mediapipe==0.10.20 opencv-python
+python -c "import mediapipe as mp; print(mp.__version__); print(hasattr(mp, 'solutions'))"
+python main.py
+
+saat program sudah berjalan klik q untuk berhenti
+
+jika ingin keluar dari venv ketik deactivate di terminal
