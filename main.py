@@ -14,7 +14,7 @@ TARGET_IMAGES_PER_CLASS = 200
 # Countdown hanya saat pindah pose
 POSE_CHANGE_COUNTDOWN_SECONDS = 5
 
-DATASET_DIR = Path("dataset_raw")
+DATASET_DIR = Path("dataset")
 CAMERA_INDEX = 0
 
 # Jeda antar auto-capture untuk pose yang sama
@@ -127,13 +127,20 @@ def main():
                     release_all(cap)
                     return
 
-                frame = cv2.flip(frame, 1)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                base_frame = cv2.flip(frame, 1)
+                dataset_frame = base_frame.copy()
+                preview_frame = dataset_frame.copy()
+                rgb = cv2.cvtColor(base_frame, cv2.COLOR_BGR2RGB)
                 results = pose.process(rgb)
 
                 if results.pose_landmarks:
                     mp_drawing.draw_landmarks(
-                        frame,
+                        dataset_frame,
+                        results.pose_landmarks,
+                        mp_pose.POSE_CONNECTIONS,
+                    )
+                    mp_drawing.draw_landmarks(
+                        preview_frame,
                         results.pose_landmarks,
                         mp_pose.POSE_CONNECTIONS,
                     )
@@ -151,9 +158,9 @@ def main():
                     "Tahan pose, lalu auto-capture akan berjalan cepat",
                     "Tekan 'q' untuk keluar",
                 ]
-                draw_multiline_text(frame, info_lines, color=(0, 255, 255))
+                draw_multiline_text(preview_frame, info_lines, color=(0, 255, 255))
 
-                cv2.imshow("Pose Dataset Collector", frame)
+                cv2.imshow("Pose Dataset Collector", preview_frame)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -176,13 +183,20 @@ def main():
                     release_all(cap)
                     return
 
-                frame = cv2.flip(frame, 1)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                base_frame = cv2.flip(frame, 1)
+                dataset_frame = base_frame.copy()
+                preview_frame = dataset_frame.copy()
+                rgb = cv2.cvtColor(base_frame, cv2.COLOR_BGR2RGB)
                 results = pose.process(rgb)
 
                 if results.pose_landmarks:
                     mp_drawing.draw_landmarks(
-                        frame,
+                        dataset_frame,
+                        results.pose_landmarks,
+                        mp_pose.POSE_CONNECTIONS,
+                    )
+                    mp_drawing.draw_landmarks(
+                        preview_frame,
                         results.pose_landmarks,
                         mp_pose.POSE_CONNECTIONS,
                     )
@@ -197,9 +211,9 @@ def main():
                     "Tekan 'n' untuk lanjut ke pose berikutnya",
                     "Tekan 'q' untuk keluar",
                 ]
-                draw_multiline_text(frame, info_lines, color=(0, 255, 0))
+                draw_multiline_text(preview_frame, info_lines, color=(0, 255, 0))
 
-                cv2.imshow("Pose Dataset Collector", frame)
+                cv2.imshow("Pose Dataset Collector", preview_frame)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -220,7 +234,7 @@ def main():
                     continue
 
                 file_path = get_next_filename(label, existing_count + 1)
-                save_frame(file_path, frame)
+                save_frame(file_path, dataset_frame)
                 existing_count += 1
                 last_capture_time = now
 
@@ -229,7 +243,7 @@ def main():
                 # flash singkat
                 flash_start = time.time()
                 while time.time() - flash_start < 0.25:
-                    flash_frame = frame.copy()
+                    flash_frame = preview_frame.copy()
                     draw_multiline_text(
                         flash_frame,
                         [
