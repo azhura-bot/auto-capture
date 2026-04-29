@@ -22,3 +22,5 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+
+.dataset/*

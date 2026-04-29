@@ -1,4 +1,5 @@
 import time
+import math
 from pathlib import Path
 
 import cv2
@@ -8,7 +9,7 @@ import mediapipe as mp
 # =========================
 # KONFIGURASI
 # =========================
-POSE_LABELS = ["left", "right", "up", "down", "idle"]
+POSE_LABELS = ["idle", "up", "down", "left", "right"]
 TARGET_IMAGES_PER_CLASS = 200
 
 # Countdown hanya saat pindah pose
@@ -16,12 +17,29 @@ POSE_CHANGE_COUNTDOWN_SECONDS = 5
 
 DATASET_DIR = Path("dataset")
 CAMERA_INDEX = 0
+FORCE_ZOOM_OUT = True
+# Nilai kecil biasanya lebih "wide" (tergantung driver kamera).
+# Banyak webcam fixed-focus akan mengabaikan properti ini.
+CAMERA_ZOOM_VALUE = 0
+AUTO_TRY_ZOOM_VALUES = True
+# Kandidat lintas driver: ada kamera yang wide di 0, ada yang pakai skala lain.
+ZOOM_CANDIDATES = [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200]
 
 # Jeda antar auto-capture untuk pose yang sama
 CAPTURE_DELAY_SECONDS = 0.25
 
 # Kalau True, hanya simpan gambar jika pose terdeteksi
 SAVE_ONLY_IF_POSE_DETECTED = True
+REQUIRE_FULL_BODY_LANDMARKS = True
+USE_POSE_RULE_FILTER = True
+
+# Aturan sederhana validasi pose
+LANDMARK_VISIBILITY_THRESHOLD = 0.55
+IDLE_KNEE_ANGLE_MIN = 175.0
+UP_KNEE_ANGLE_MIN = 178.0
+DOWN_KNEE_ANGLE_MIN = 160.0
+DOWN_KNEE_ANGLE_MAX = 173.0
+LEFT_RIGHT_CENTER_OFFSET_MIN = 0.04
 
 # Ukuran preview
 FRAME_WIDTH = 960
@@ -81,6 +99,95 @@ def release_all(cap):
     cv2.destroyAllWindows()
 
 
+def landmark_visible(landmarks, idx, threshold=LANDMARK_VISIBILITY_THRESHOLD) -> bool:
+    return landmarks[idx].visibility >= threshold
+
+
+def calculate_angle(a, b, c) -> float:
+    # Sudut ABC dalam derajat (0..180)
+    ab_x, ab_y = a[0] - b[0], a[1] - b[1]
+    cb_x, cb_y = c[0] - b[0], c[1] - b[1]
+    dot = (ab_x * cb_x) + (ab_y * cb_y)
+    mag_ab = math.sqrt((ab_x * ab_x) + (ab_y * ab_y))
+    mag_cb = math.sqrt((cb_x * cb_x) + (cb_y * cb_y))
+    if mag_ab == 0 or mag_cb == 0:
+        return 180.0
+    cosang = max(-1.0, min(1.0, dot / (mag_ab * mag_cb)))
+    return math.degrees(math.acos(cosang))
+
+
+def evaluate_pose_for_label(results, mp_pose, label: str):
+    if not results.pose_landmarks:
+        return False, "Pose tidak terdeteksi", {}
+
+    lm = results.pose_landmarks.landmark
+    pl = mp_pose.PoseLandmark
+
+    required = [
+        pl.LEFT_SHOULDER,
+        pl.RIGHT_SHOULDER,
+        pl.LEFT_HIP,
+        pl.RIGHT_HIP,
+        pl.LEFT_KNEE,
+        pl.RIGHT_KNEE,
+        pl.LEFT_ANKLE,
+        pl.RIGHT_ANKLE,
+    ]
+
+    missing = [p.name for p in required if not landmark_visible(lm, p.value)]
+    if REQUIRE_FULL_BODY_LANDMARKS and missing:
+        return False, "Full body belum terlihat (bahu-ankle)", {}
+
+    left_knee = calculate_angle(
+        (lm[pl.LEFT_HIP.value].x, lm[pl.LEFT_HIP.value].y),
+        (lm[pl.LEFT_KNEE.value].x, lm[pl.LEFT_KNEE.value].y),
+        (lm[pl.LEFT_ANKLE.value].x, lm[pl.LEFT_ANKLE.value].y),
+    )
+    right_knee = calculate_angle(
+        (lm[pl.RIGHT_HIP.value].x, lm[pl.RIGHT_HIP.value].y),
+        (lm[pl.RIGHT_KNEE.value].x, lm[pl.RIGHT_KNEE.value].y),
+        (lm[pl.RIGHT_ANKLE.value].x, lm[pl.RIGHT_ANKLE.value].y),
+    )
+    avg_knee = (left_knee + right_knee) / 2.0
+    hip_center_x = (lm[pl.LEFT_HIP.value].x + lm[pl.RIGHT_HIP.value].x) / 2.0
+    shoulder_center_x = (lm[pl.LEFT_SHOULDER.value].x + lm[pl.RIGHT_SHOULDER.value].x) / 2.0
+    shoulder_offset_x = shoulder_center_x - hip_center_x
+
+    if not USE_POSE_RULE_FILTER:
+        return True, "Pose terdeteksi", {
+            "left_knee": left_knee,
+            "right_knee": right_knee,
+            "avg_knee": avg_knee,
+            "shoulder_offset_x": shoulder_offset_x,
+        }
+
+    if label == "idle":
+        ok = avg_knee >= IDLE_KNEE_ANGLE_MIN
+        msg = "Idle valid" if ok else "Idle gagal: lutut terlalu tekuk"
+    elif label == "up":
+        ok = avg_knee >= UP_KNEE_ANGLE_MIN
+        msg = "Up valid" if ok else "Up gagal: luruskan lutut"
+    elif label == "down":
+        ok = DOWN_KNEE_ANGLE_MIN <= avg_knee <= DOWN_KNEE_ANGLE_MAX
+        msg = "Down valid" if ok else "Down gagal: tekuk lutut lebih dalam"
+    elif label == "left":
+        ok = shoulder_offset_x <= -LEFT_RIGHT_CENTER_OFFSET_MIN
+        msg = "Left valid" if ok else "Left gagal: geser/condongkan tubuh ke kiri"
+    elif label == "right":
+        ok = shoulder_offset_x >= LEFT_RIGHT_CENTER_OFFSET_MIN
+        msg = "Right valid" if ok else "Right gagal: geser/condongkan tubuh ke kanan"
+    else:
+        ok = True
+        msg = "Pose valid"
+
+    return ok, msg, {
+        "left_knee": left_knee,
+        "right_knee": right_knee,
+        "avg_knee": avg_knee,
+        "shoulder_offset_x": shoulder_offset_x,
+    }
+
+
 def main():
     ensure_directories()
 
@@ -92,6 +199,38 @@ def main():
     if not cap.isOpened():
         raise RuntimeError("Webcam tidak bisa dibuka. Cek CAMERA_INDEX atau izin kamera.")
 
+    if FORCE_ZOOM_OUT:
+        if AUTO_TRY_ZOOM_VALUES:
+            best_value = None
+            best_readback = float("inf")
+            accepted = []
+            for z in ZOOM_CANDIDATES:
+                ok = cap.set(cv2.CAP_PROP_ZOOM, z)
+                rb = cap.get(cv2.CAP_PROP_ZOOM)
+                accepted.append((z, ok, rb))
+                # Asumsi umum: readback lebih kecil cenderung lebih wide.
+                if ok and rb < best_readback:
+                    best_readback = rb
+                    best_value = z
+
+            if best_value is not None:
+                cap.set(cv2.CAP_PROP_ZOOM, best_value)
+                final_rb = cap.get(cv2.CAP_PROP_ZOOM)
+                print(f"[KAMERA] Auto zoom-out pilih value={best_value}, readback={final_rb:.2f}")
+            else:
+                print("[KAMERA] Kamera tidak menerima perubahan zoom (kemungkinan fixed lens).")
+
+            print("[KAMERA] Hasil uji zoom:")
+            for z, ok, rb in accepted:
+                print(f"  - try={z:>3} -> {'OK' if ok else 'NO'} | readback={rb:.2f}")
+        else:
+            zoom_ok = cap.set(cv2.CAP_PROP_ZOOM, CAMERA_ZOOM_VALUE)
+            current_zoom = cap.get(cv2.CAP_PROP_ZOOM)
+            print(
+                f"[KAMERA] Set zoom={CAMERA_ZOOM_VALUE} -> "
+                f"{'berhasil' if zoom_ok else 'gagal/diabaikan'}, baca balik={current_zoom:.2f}"
+            )
+
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 
@@ -99,11 +238,11 @@ def main():
 
     with mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=1,
+        model_complexity=2,
         enable_segmentation=False,
         smooth_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
+        min_detection_confidence=0.45,
+        min_tracking_confidence=0.45,
     ) as pose:
         for label in POSE_LABELS:
             existing_count = count_existing_images(label)
@@ -145,6 +284,15 @@ def main():
                         mp_pose.POSE_CONNECTIONS,
                     )
 
+                pose_valid, pose_msg, pose_meta = evaluate_pose_for_label(results, mp_pose, label)
+                if pose_meta:
+                    if label in ("left", "right"):
+                        metric_text = f"Offset bahu-hip X: {pose_meta['shoulder_offset_x']:+.3f}"
+                    else:
+                        metric_text = f"Lutut L/R: {pose_meta['left_knee']:.0f}/{pose_meta['right_knee']:.0f}"
+                else:
+                    metric_text = "Metric: -"
+
                 elapsed = time.time() - countdown_start
                 remaining = max(
                     0,
@@ -154,7 +302,10 @@ def main():
                 info_lines = [
                     f"Sekarang: {label}",
                     f"Progress: {existing_count}/{TARGET_IMAGES_PER_CLASS}",
+                    metric_text,
+                    f"Status pose: {pose_msg}",
                     f"Mulai capture dalam: {remaining} detik",
+                    "Tekan 's' untuk buka setting kamera",
                     "Tahan pose, lalu auto-capture akan berjalan cepat",
                     "Tekan 'q' untuk keluar",
                 ]
@@ -167,6 +318,8 @@ def main():
                     print("Program dihentikan oleh user.")
                     release_all(cap)
                     return
+                if key == ord("s"):
+                    cap.set(cv2.CAP_PROP_SETTINGS, 1)
 
                 if elapsed >= POSE_CHANGE_COUNTDOWN_SECONDS:
                     break
@@ -201,13 +354,25 @@ def main():
                         mp_pose.POSE_CONNECTIONS,
                     )
 
+                pose_valid, pose_msg, pose_meta = evaluate_pose_for_label(results, mp_pose, label)
+                if pose_meta:
+                    if label in ("left", "right"):
+                        metric_text = f"Offset bahu-hip X: {pose_meta['shoulder_offset_x']:+.3f}"
+                    else:
+                        metric_text = f"Lutut L/R: {pose_meta['left_knee']:.0f}/{pose_meta['right_knee']:.0f}"
+                else:
+                    metric_text = "Metric: -"
+
                 now = time.time()
                 time_until_next_capture = max(0.0, CAPTURE_DELAY_SECONDS - (now - last_capture_time))
 
                 info_lines = [
                     f"Sekarang: {label}",
                     f"Progress: {existing_count}/{TARGET_IMAGES_PER_CLASS}",
+                    metric_text,
+                    f"Status pose: {pose_msg}",
                     f"Capture berikutnya: {time_until_next_capture:.2f} detik",
+                    "Tekan 's' untuk buka setting kamera",
                     "Tekan 'n' untuk lanjut ke pose berikutnya",
                     "Tekan 'q' untuk keluar",
                 ]
@@ -220,6 +385,8 @@ def main():
                     print("Program dihentikan oleh user.")
                     release_all(cap)
                     return
+                if key == ord("s"):
+                    cap.set(cv2.CAP_PROP_SETTINGS, 1)
 
                 # opsional: tekan n untuk langsung lanjut ke pose berikutnya
                 if key == ord("n"):
@@ -231,6 +398,8 @@ def main():
 
                 pose_detected = results.pose_landmarks is not None
                 if SAVE_ONLY_IF_POSE_DETECTED and not pose_detected:
+                    continue
+                if not pose_valid:
                     continue
 
                 file_path = get_next_filename(label, existing_count + 1)
