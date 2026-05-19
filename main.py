@@ -9,7 +9,7 @@ import mediapipe as mp
 # =========================
 # KONFIGURASI
 # =========================
-POSE_LABELS = ["idle", "up", "down", "left", "right"]
+POSE_LABELS = ["left", "right"]
 TARGET_IMAGES_PER_CLASS = 200
 
 # Countdown hanya saat pindah pose
@@ -30,7 +30,7 @@ CAPTURE_DELAY_SECONDS = 0.25
 
 # Kalau True, hanya simpan gambar jika pose terdeteksi
 SAVE_ONLY_IF_POSE_DETECTED = True
-REQUIRE_FULL_BODY_LANDMARKS = True
+REQUIRE_FULL_BODY_LANDMARKS = False
 USE_POSE_RULE_FILTER = True
 
 # Aturan sederhana validasi pose
@@ -39,11 +39,16 @@ IDLE_KNEE_ANGLE_MIN = 175.0
 UP_KNEE_ANGLE_MIN = 178.0
 DOWN_KNEE_ANGLE_MIN = 160.0
 DOWN_KNEE_ANGLE_MAX = 173.0
-LEFT_RIGHT_CENTER_OFFSET_MIN = 0.04
+ARM_RAISE_HIP_DELTA_Y_MIN = 0.03
+ARM_WRIST_SIDE_GAP_MIN = 0.03
+NON_ACTIVE_WRIST_MAX_RAISE = 0.01
+REQUIRED_VALID_STREAK = 3
+POSE_HOLD_MAX_MISSING_FRAMES = 6
 
 # Ukuran preview
 FRAME_WIDTH = 960
 FRAME_HEIGHT = 720
+MIRROR_PREVIEW = True
 
 
 # =========================
@@ -116,49 +121,76 @@ def calculate_angle(a, b, c) -> float:
     return math.degrees(math.acos(cosang))
 
 
-def evaluate_pose_for_label(results, mp_pose, label: str):
-    if not results.pose_landmarks:
+def evaluate_pose_for_label(pose_landmarks, mp_pose, label: str):
+    if not pose_landmarks:
         return False, "Pose tidak terdeteksi", {}
 
-    lm = results.pose_landmarks.landmark
+    lm = pose_landmarks.landmark
     pl = mp_pose.PoseLandmark
 
-    required = [
-        pl.LEFT_SHOULDER,
-        pl.RIGHT_SHOULDER,
-        pl.LEFT_HIP,
-        pl.RIGHT_HIP,
-        pl.LEFT_KNEE,
-        pl.RIGHT_KNEE,
-        pl.LEFT_ANKLE,
-        pl.RIGHT_ANKLE,
-    ]
+    effective_label = label
+    if MIRROR_PREVIEW:
+        if label == "left":
+            effective_label = "right"
+        elif label == "right":
+            effective_label = "left"
+
+    if effective_label in ("left", "right"):
+        required = [
+            pl.LEFT_SHOULDER,
+            pl.RIGHT_SHOULDER,
+            pl.LEFT_ELBOW,
+            pl.RIGHT_ELBOW,
+            pl.LEFT_WRIST,
+            pl.RIGHT_WRIST,
+        ]
+    else:
+        required = [
+            pl.LEFT_SHOULDER,
+            pl.RIGHT_SHOULDER,
+            pl.LEFT_HIP,
+            pl.RIGHT_HIP,
+            pl.LEFT_KNEE,
+            pl.RIGHT_KNEE,
+            pl.LEFT_ANKLE,
+            pl.RIGHT_ANKLE,
+        ]
 
     missing = [p.name for p in required if not landmark_visible(lm, p.value)]
-    if REQUIRE_FULL_BODY_LANDMARKS and missing:
-        return False, "Full body belum terlihat (bahu-ankle)", {}
+    if missing:
+        if effective_label in ("left", "right"):
+            return False, "Upper body belum terlihat jelas (bahu-siku-pergelangan)", {}
+        if REQUIRE_FULL_BODY_LANDMARKS:
+            return False, "Full body belum terlihat (bahu-ankle)", {}
 
-    left_knee = calculate_angle(
-        (lm[pl.LEFT_HIP.value].x, lm[pl.LEFT_HIP.value].y),
-        (lm[pl.LEFT_KNEE.value].x, lm[pl.LEFT_KNEE.value].y),
-        (lm[pl.LEFT_ANKLE.value].x, lm[pl.LEFT_ANKLE.value].y),
-    )
-    right_knee = calculate_angle(
-        (lm[pl.RIGHT_HIP.value].x, lm[pl.RIGHT_HIP.value].y),
-        (lm[pl.RIGHT_KNEE.value].x, lm[pl.RIGHT_KNEE.value].y),
-        (lm[pl.RIGHT_ANKLE.value].x, lm[pl.RIGHT_ANKLE.value].y),
-    )
-    avg_knee = (left_knee + right_knee) / 2.0
-    hip_center_x = (lm[pl.LEFT_HIP.value].x + lm[pl.RIGHT_HIP.value].x) / 2.0
-    shoulder_center_x = (lm[pl.LEFT_SHOULDER.value].x + lm[pl.RIGHT_SHOULDER.value].x) / 2.0
-    shoulder_offset_x = shoulder_center_x - hip_center_x
+    left_knee = 180.0
+    right_knee = 180.0
+    avg_knee = 180.0
+    if effective_label not in ("left", "right"):
+        left_knee = calculate_angle(
+            (lm[pl.LEFT_HIP.value].x, lm[pl.LEFT_HIP.value].y),
+            (lm[pl.LEFT_KNEE.value].x, lm[pl.LEFT_KNEE.value].y),
+            (lm[pl.LEFT_ANKLE.value].x, lm[pl.LEFT_ANKLE.value].y),
+        )
+        right_knee = calculate_angle(
+            (lm[pl.RIGHT_HIP.value].x, lm[pl.RIGHT_HIP.value].y),
+            (lm[pl.RIGHT_KNEE.value].x, lm[pl.RIGHT_KNEE.value].y),
+            (lm[pl.RIGHT_ANKLE.value].x, lm[pl.RIGHT_ANKLE.value].y),
+        )
+        avg_knee = (left_knee + right_knee) / 2.0
+
+    left_arm_raise_delta_y = lm[pl.LEFT_HIP.value].y - lm[pl.LEFT_WRIST.value].y
+    right_arm_raise_delta_y = lm[pl.RIGHT_HIP.value].y - lm[pl.RIGHT_WRIST.value].y
+    wrist_height_gap = lm[pl.RIGHT_WRIST.value].y - lm[pl.LEFT_WRIST.value].y
 
     if not USE_POSE_RULE_FILTER:
         return True, "Pose terdeteksi", {
             "left_knee": left_knee,
             "right_knee": right_knee,
             "avg_knee": avg_knee,
-            "shoulder_offset_x": shoulder_offset_x,
+            "left_arm_raise_delta_y": left_arm_raise_delta_y,
+            "right_arm_raise_delta_y": right_arm_raise_delta_y,
+            "wrist_height_gap": wrist_height_gap,
         }
 
     if label == "idle":
@@ -170,12 +202,26 @@ def evaluate_pose_for_label(results, mp_pose, label: str):
     elif label == "down":
         ok = DOWN_KNEE_ANGLE_MIN <= avg_knee <= DOWN_KNEE_ANGLE_MAX
         msg = "Down valid" if ok else "Down gagal: tekuk lutut lebih dalam"
-    elif label == "left":
-        ok = shoulder_offset_x <= -LEFT_RIGHT_CENTER_OFFSET_MIN
-        msg = "Left valid" if ok else "Left gagal: geser/condongkan tubuh ke kiri"
-    elif label == "right":
-        ok = shoulder_offset_x >= LEFT_RIGHT_CENTER_OFFSET_MIN
-        msg = "Right valid" if ok else "Right gagal: geser/condongkan tubuh ke kanan"
+    elif effective_label == "left":
+        left_raised = left_arm_raise_delta_y >= ARM_RAISE_HIP_DELTA_Y_MIN
+        higher_than_right = wrist_height_gap >= ARM_WRIST_SIDE_GAP_MIN
+        right_not_raised = right_arm_raise_delta_y <= NON_ACTIVE_WRIST_MAX_RAISE
+        ok = left_raised and higher_than_right and right_not_raised
+        msg = (
+            f"{label.capitalize()} valid"
+            if ok
+            else f"{label.capitalize()} gagal: tangan target harus di atas pinggang, tangan satunya tetap netral"
+        )
+    elif effective_label == "right":
+        right_raised = right_arm_raise_delta_y >= ARM_RAISE_HIP_DELTA_Y_MIN
+        higher_than_left = (-wrist_height_gap) >= ARM_WRIST_SIDE_GAP_MIN
+        left_not_raised = left_arm_raise_delta_y <= NON_ACTIVE_WRIST_MAX_RAISE
+        ok = right_raised and higher_than_left and left_not_raised
+        msg = (
+            f"{label.capitalize()} valid"
+            if ok
+            else f"{label.capitalize()} gagal: tangan target harus di atas pinggang, tangan satunya tetap netral"
+        )
     else:
         ok = True
         msg = "Pose valid"
@@ -184,7 +230,9 @@ def evaluate_pose_for_label(results, mp_pose, label: str):
         "left_knee": left_knee,
         "right_knee": right_knee,
         "avg_knee": avg_knee,
-        "shoulder_offset_x": shoulder_offset_x,
+        "left_arm_raise_delta_y": left_arm_raise_delta_y,
+        "right_arm_raise_delta_y": right_arm_raise_delta_y,
+        "wrist_height_gap": wrist_height_gap,
     }
 
 
@@ -246,6 +294,8 @@ def main():
     ) as pose:
         for label in POSE_LABELS:
             existing_count = count_existing_images(label)
+            last_pose_landmarks = None
+            missing_pose_frames = 0
 
             if existing_count >= TARGET_IMAGES_PER_CLASS:
                 print(f"[SKIP] Kelas '{label}' sudah memiliki {existing_count} gambar.")
@@ -271,23 +321,40 @@ def main():
                 preview_frame = dataset_frame.copy()
                 rgb = cv2.cvtColor(base_frame, cv2.COLOR_BGR2RGB)
                 results = pose.process(rgb)
-
                 if results.pose_landmarks:
+                    last_pose_landmarks = results.pose_landmarks
+                    missing_pose_frames = 0
+                    effective_pose_landmarks = results.pose_landmarks
+                else:
+                    missing_pose_frames += 1
+                    if missing_pose_frames <= POSE_HOLD_MAX_MISSING_FRAMES:
+                        effective_pose_landmarks = last_pose_landmarks
+                    else:
+                        effective_pose_landmarks = None
+                        last_pose_landmarks = None
+
+                if effective_pose_landmarks:
                     mp_drawing.draw_landmarks(
                         dataset_frame,
-                        results.pose_landmarks,
+                        effective_pose_landmarks,
                         mp_pose.POSE_CONNECTIONS,
                     )
                     mp_drawing.draw_landmarks(
                         preview_frame,
-                        results.pose_landmarks,
+                        effective_pose_landmarks,
                         mp_pose.POSE_CONNECTIONS,
                     )
 
-                pose_valid, pose_msg, pose_meta = evaluate_pose_for_label(results, mp_pose, label)
+                pose_valid, pose_msg, pose_meta = evaluate_pose_for_label(
+                    effective_pose_landmarks, mp_pose, label
+                )
                 if pose_meta:
                     if label in ("left", "right"):
-                        metric_text = f"Offset bahu-hip X: {pose_meta['shoulder_offset_x']:+.3f}"
+                        metric_text = (
+                            f"Raise(HIP) L/R: {pose_meta['left_arm_raise_delta_y']:+.3f}/"
+                            f"{pose_meta['right_arm_raise_delta_y']:+.3f} | "
+                            f"Gap R-L: {pose_meta['wrist_height_gap']:+.3f}"
+                        )
                     else:
                         metric_text = f"Lutut L/R: {pose_meta['left_knee']:.0f}/{pose_meta['right_knee']:.0f}"
                 else:
@@ -328,6 +395,7 @@ def main():
             # 2) AUTO-CAPTURE CEPAT UNTUK POSE YANG SAMA
             # =========================================
             last_capture_time = 0.0
+            valid_streak = 0
 
             while existing_count < TARGET_IMAGES_PER_CLASS:
                 ret, frame = cap.read()
@@ -341,23 +409,40 @@ def main():
                 preview_frame = dataset_frame.copy()
                 rgb = cv2.cvtColor(base_frame, cv2.COLOR_BGR2RGB)
                 results = pose.process(rgb)
-
                 if results.pose_landmarks:
+                    last_pose_landmarks = results.pose_landmarks
+                    missing_pose_frames = 0
+                    effective_pose_landmarks = results.pose_landmarks
+                else:
+                    missing_pose_frames += 1
+                    if missing_pose_frames <= POSE_HOLD_MAX_MISSING_FRAMES:
+                        effective_pose_landmarks = last_pose_landmarks
+                    else:
+                        effective_pose_landmarks = None
+                        last_pose_landmarks = None
+
+                if effective_pose_landmarks:
                     mp_drawing.draw_landmarks(
                         dataset_frame,
-                        results.pose_landmarks,
+                        effective_pose_landmarks,
                         mp_pose.POSE_CONNECTIONS,
                     )
                     mp_drawing.draw_landmarks(
                         preview_frame,
-                        results.pose_landmarks,
+                        effective_pose_landmarks,
                         mp_pose.POSE_CONNECTIONS,
                     )
 
-                pose_valid, pose_msg, pose_meta = evaluate_pose_for_label(results, mp_pose, label)
+                pose_valid, pose_msg, pose_meta = evaluate_pose_for_label(
+                    effective_pose_landmarks, mp_pose, label
+                )
                 if pose_meta:
                     if label in ("left", "right"):
-                        metric_text = f"Offset bahu-hip X: {pose_meta['shoulder_offset_x']:+.3f}"
+                        metric_text = (
+                            f"Raise(HIP) L/R: {pose_meta['left_arm_raise_delta_y']:+.3f}/"
+                            f"{pose_meta['right_arm_raise_delta_y']:+.3f} | "
+                            f"Gap R-L: {pose_meta['wrist_height_gap']:+.3f}"
+                        )
                     else:
                         metric_text = f"Lutut L/R: {pose_meta['left_knee']:.0f}/{pose_meta['right_knee']:.0f}"
                 else:
@@ -396,16 +481,23 @@ def main():
                 if now - last_capture_time < CAPTURE_DELAY_SECONDS:
                     continue
 
-                pose_detected = results.pose_landmarks is not None
+                pose_detected = effective_pose_landmarks is not None
                 if SAVE_ONLY_IF_POSE_DETECTED and not pose_detected:
+                    valid_streak = 0
                     continue
                 if not pose_valid:
+                    valid_streak = 0
+                    continue
+
+                valid_streak += 1
+                if valid_streak < REQUIRED_VALID_STREAK:
                     continue
 
                 file_path = get_next_filename(label, existing_count + 1)
                 save_frame(file_path, dataset_frame)
                 existing_count += 1
                 last_capture_time = now
+                valid_streak = 0
 
                 print(f"[{label}] Tersimpan: {file_path.name} ({existing_count}/{TARGET_IMAGES_PER_CLASS})")
 
