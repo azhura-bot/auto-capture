@@ -49,6 +49,7 @@ POSE_HOLD_MAX_MISSING_FRAMES = 6
 FRAME_WIDTH = 960
 FRAME_HEIGHT = 720
 MIRROR_PREVIEW = True
+SHOW_OVERLAY_TEXT = False
 
 
 # =========================
@@ -376,7 +377,8 @@ def main():
                     "Tahan pose, lalu auto-capture akan berjalan cepat",
                     "Tekan 'q' untuk keluar",
                 ]
-                draw_multiline_text(preview_frame, info_lines, color=(0, 255, 255))
+                if SHOW_OVERLAY_TEXT:
+                    draw_multiline_text(preview_frame, info_lines, color=(0, 255, 255))
 
                 cv2.imshow("Pose Dataset Collector", preview_frame)
 
@@ -461,7 +463,8 @@ def main():
                     "Tekan 'n' untuk lanjut ke pose berikutnya",
                     "Tekan 'q' untuk keluar",
                 ]
-                draw_multiline_text(preview_frame, info_lines, color=(0, 255, 0))
+                if SHOW_OVERLAY_TEXT:
+                    draw_multiline_text(preview_frame, info_lines, color=(0, 255, 0))
 
                 cv2.imshow("Pose Dataset Collector", preview_frame)
 
@@ -505,15 +508,16 @@ def main():
                 flash_start = time.time()
                 while time.time() - flash_start < 0.25:
                     flash_frame = preview_frame.copy()
-                    draw_multiline_text(
-                        flash_frame,
-                        [
-                            f"Sekarang: {label}",
-                            f"Progress: {existing_count}/{TARGET_IMAGES_PER_CLASS}",
-                            "CAPTURE BERHASIL",
-                        ],
-                        color=(0, 255, 0),
-                    )
+                    if SHOW_OVERLAY_TEXT:
+                        draw_multiline_text(
+                            flash_frame,
+                            [
+                                f"Sekarang: {label}",
+                                f"Progress: {existing_count}/{TARGET_IMAGES_PER_CLASS}",
+                                "CAPTURE BERHASIL",
+                            ],
+                            color=(0, 255, 0),
+                        )
                     cv2.imshow("Pose Dataset Collector", flash_frame)
                     if (cv2.waitKey(1) & 0xFF) == ord("q"):
                         print("Program dihentikan oleh user.")
